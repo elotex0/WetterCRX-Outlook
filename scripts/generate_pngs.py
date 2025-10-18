@@ -1,6 +1,7 @@
 import sys
 import cfgrib
 import xarray as xr
+import netCDF4
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -9,85 +10,105 @@ import os
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 import matplotlib.patheffects as path_effects
+from scipy.interpolate import griddata
 from zoneinfo import ZoneInfo
+from adjustText import adjust_text
 import numpy as np
 from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap
 import warnings
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+from scipy.ndimage import gaussian_filter
+from multiprocessing import Pool
+from matplotlib.tri import Triangulation
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # ------------------------------
 # Eingabe-/Ausgabe
 # ------------------------------
-data_dir = sys.argv[1]        # z.B. "output"
-output_dir = sys.argv[2]      # z.B. "output/maps"
-var_type = sys.argv[3]        # 't2m', 'ww', 'tp', 'tp_acc', 'cape_ml', 'dbz_cmax'
-os.makedirs(output_dir, exist_ok=True)
+data_dir = sys.argv[1]
+output_dir = sys.argv[2]
+var_type = sys.argv[3].lower()
+gridfile = sys.argv[4] if len(sys.argv) > 4 else "data/grid/grid.nc"
 
-# <<< ECMWF-Änderung >>>
-ECMWF_VARS = {
-    "t2m": ["t2m"],             # Temperatur 2m
-    "tp_acc": ["tp"],              # Niederschlag akkumaliert
-    "ww": ["ptype"],
-    "wind": ["max_i10fg", "10si"],  # Böen oder 10m-Wind
-    "pmsl": ["msl"],           # Luftdruck
-}
+if not os.path.exists(gridfile):
+    raise FileNotFoundError(f"Grid-Datei nicht gefunden: {gridfile}")
+    
+os.makedirs(output_dir, exist_ok=True)
 
 # ------------------------------
 # Geo-Daten
 # ------------------------------
 cities = pd.DataFrame({
-    'name': ['Berlin', 'Hamburg', 'München', 'Köln', 'Frankfurt', 'Dresden', 'Stuttgart', 'Düsseldorf',
-             'Nürnberg', 'Erfurt', 'Leipzig', 'Bremen', 'Saarbrücken', 'Hannover'],
+    'name': ['Berlin', 'Hamburg', 'München', 'Köln', 'Frankfurt', 'Dresden',
+             'Stuttgart', 'Düsseldorf', 'Nürnberg', 'Erfurt', 'Leipzig',
+             'Bremen', 'Saarbrücken', 'Hannover'],
     'lat': [52.52, 53.55, 48.14, 50.94, 50.11, 51.05, 48.78, 51.23,
             49.45, 50.98, 51.34, 53.08, 49.24, 52.37],
     'lon': [13.40, 9.99, 11.57, 6.96, 8.68, 13.73, 9.18, 6.78,
             11.08, 11.03, 12.37, 8.80, 6.99, 9.73]
 })
 
-ignore_codes = {4}
-
 # ------------------------------
-# WW-Farben
+# Farben und Normen
 # ------------------------------
 ww_colors_base = {
-    0: "#676767",
-    1: "#00FF00",
-    12:"#FF6347",
-    3: "#8B0000",
-    5: "#00008B",
-    6: "#FFA500",
-    7: "#C06A00",
-
+    0: "#696969", 1: "#696969", 2: "#696969", 3: "#696969",
+    45: "#FFFF00", 48: "#FFD700",
+    56: "#FFA500", 57: "#C06A00",
+    51: "#00FF00", 53: "#00C300", 55: "#009700",
+    61: "#00FF00", 63: "#00C300", 65: "#009700",
+    80: "#00FF00", 81: "#00C300", 82: "#009700",
+    66: "#FF6347", 67: "#8B0000",
+    71: "#ADD8E6", 73: "#6495ED", 75: "#00008B",
+    95: "#FF77FF", 96: "#C71585", 99: "#C71585"
 }
 ww_categories = {
-    "Kein Regen": [0],
-    "Regen": [1],
-    "Schneeregen": [6, 7],
-    "gefr. Nieselregen/Regen": [12, 3],
-    "Schnee": [5],
+    "Nebel": [45],
+    "Schneeregen": [56, 57],
+    "Regen": [61, 63, 65],
+    "gefr. Regen": [66, 67],
+    "Schnee": [71, 73, 75],
+    "Gewitter": [95,96],
 }
 
-# ------------------------------
-# Temperatur-Farben
-# ------------------------------
-t2m_bounds = list(range(-28, 41, 2))
-t2m_colors = [
-    "#C802CB", "#AA00A9", "#8800AA", "#6600AA", "#4400AB",
-    "#2201AA", "#0000CC", "#0033CC", "#0044CB", "#0055CC",
-    "#0066CB", "#0076CD", "#0088CC", "#0099CB", "#00A5CB",
-    "#00BB22", "#11C501", "#32D500", "#77D600", "#87DD00",
-    "#FFCC00", "#FFBB00", "#FFAA01", "#FE9900", "#FF8800",
-    "#FF6600", "#FF3300", "#FE0000", "#DC0000", "#BA0100",
-    "#91002B", "#980065", "#BB0099", "#EE01AB", "#FF21FE"
-]
+t2m_bounds = list(range(-36, 50, 2))
+t2m_colors = LinearSegmentedColormap.from_list(
+    "t2m_smoooth",
+    [
+        "#F675F4", "#F428E9", "#B117B5", "#950CA2", "#640180",
+        "#3E007F", "#00337E", "#005295", "#1292FF", "#49ACFF",
+        "#8FCDFF", "#B4DBFF", "#B9ECDD", "#88D4AD", "#07A125",
+        "#3FC107", "#9DE004", "#E7F700", "#F3CD0A", "#EE5505",
+        "#C81904", "#AF0E14", "#620001", "#C87879", "#FACACA",
+        "#E1E1E1", "#6D6D6D"
+    ],
+    N=len(t2m_bounds)
+)
+t2m_norm = BoundaryNorm(t2m_bounds, ncolors=len(t2m_bounds))
 
-t2m_cmap = ListedColormap(t2m_colors)
-t2m_norm = mcolors.BoundaryNorm(t2m_bounds, t2m_cmap.N)
+prec_bounds = [0.1, 0.2, 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+               12, 14, 16, 20, 24, 30, 40, 50, 60, 80, 100, 125]
+prec_colors = ListedColormap([
+    "#B4D7FF","#75BAFF","#349AFF","#0582FF","#0069D2",
+    "#003680","#148F1B","#1ACF06","#64ED07","#FFF32B",
+    "#E9DC01","#F06000","#FF7F26","#FFA66A","#F94E78",
+    "#F71E53","#BE0000","#880000","#64007F","#C201FC",
+    "#DD66FE","#EBA6FF","#F9E7FF","#D4D4D4","#969696"
+])
+prec_norm = BoundaryNorm(prec_bounds, prec_colors.N)
 
-# ------------------------------
-# Aufsummierter Niederschlag (tp_acc)
-# ------------------------------
+dbz_bounds = [0, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 63, 67, 70]
+dbz_colors = ListedColormap([
+    "#676767", "#FFFFFF", "#B3EFED", "#8CE7E2", "#00F5ED",
+    "#00CEF0", "#01AFF4", "#028DF6", "#014FF7", "#0000F6",
+    "#00FF01", "#01DF00", "#00D000", "#00BF00", "#00A701",
+    "#019700", "#FFFF00", "#F9F000", "#EDD200", "#E7B500",
+    "#FF5000", "#FF2801", "#F40000", "#EA0001", "#CC0000",
+    "#FFC8FF", "#E9A1EA", "#D379D3", "#BE55BE", "#960E96"
+])
+dbz_norm = mcolors.BoundaryNorm(dbz_bounds, dbz_colors.N)
+
 tp_acc_bounds = [0.1, 1, 2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100,
                  125, 150, 175, 200, 250, 300, 400, 500]
 tp_acc_colors = ListedColormap([
@@ -98,6 +119,28 @@ tp_acc_colors = ListedColormap([
     "#DD66FE","#EBA6FF","#F9E7FF","#D4D4D4","#969696"
 ])
 tp_acc_norm = mcolors.BoundaryNorm(tp_acc_bounds, tp_acc_colors.N)
+
+cape_bounds = [0, 20, 40, 60, 80, 100, 200, 400, 600, 800, 1000, 1500, 2000, 2500, 3000]
+cape_colors = ListedColormap([
+    "#676767", "#006400", "#008000", "#00CC00", "#66FF00", "#FFFF00", 
+    "#FFCC00", "#FF9900", "#FF6600", "#FF3300", "#FF0000", "#FF0095", 
+    "#FC439F", "#FF88D3", "#FF99FF"
+])
+cape_norm = mcolors.BoundaryNorm(cape_bounds, cape_colors.N)
+
+pmsl_bounds_colors = list(range(912, 1070, 4))
+pmsl_colors = LinearSegmentedColormap.from_list(
+    "pmsl_smooth",
+    [
+       "#FF6DFF", "#C418C4", "#950CA2", "#5A007D", "#3D007F",
+       "#00337E", "#0472CB", "#4FABF8", "#A3D4FF", "#79DAAD",
+       "#07A220", "#3EC008", "#9EE002", "#F3FC01", "#F19806",
+       "#F74F11", "#B81212", "#8C3234", "#C87879", "#F9CBCD",
+       "#E2E2E2"
+    ],
+    N=len(pmsl_bounds_colors)
+)
+pmsl_norm = BoundaryNorm(pmsl_bounds_colors, ncolors=len(pmsl_bounds_colors))
 
 # ------------------------------
 # Windböen-Farben
@@ -112,28 +155,6 @@ wind_colors = ListedColormap([
 ])
 wind_norm = mcolors.BoundaryNorm(wind_bounds, wind_colors.N)
 
-
-# ------------------------------
-# Luftdruck
-# ------------------------------
-
-# Luftdruck-Farben (kontinuierlicher Farbverlauf für 45 Bins)
-pmsl_bounds_colors = list(range(920, 1060, 4))  # Alle 4 hPa (45 Bins)
-pmsl_colors = LinearSegmentedColormap.from_list(
-    "pmsl_smooth",
-    [
-        "#C802CB", "#AA00A9",
-        "#2201AA", 
-        "#0066CB", "#0076CD", 
-        "#00BB22", "#11C501",  
-        "#FFCC00",  
-        "#FF6600", "#FF0000", 
-        "#FFFFFF", "#C1C1C1"
-    ],
-    N=len(pmsl_bounds_colors)  # Genau 45 Farben für 45 Bins
-)
-pmsl_norm = BoundaryNorm(pmsl_bounds_colors, ncolors=len(pmsl_bounds_colors))
-
 # ------------------------------
 # Kartenparameter
 # ------------------------------
@@ -141,8 +162,6 @@ FIG_W_PX, FIG_H_PX = 880, 830
 BOTTOM_AREA_PX = 179
 TOP_AREA_PX = FIG_H_PX - BOTTOM_AREA_PX
 TARGET_ASPECT = FIG_W_PX / TOP_AREA_PX
-
-# Bounding Box Deutschland (fix, keine GeoJSON nötig)
 extent = [5, 16, 47, 56]
 
 # ------------------------------
@@ -168,84 +187,77 @@ def add_ww_legend_bottom(fig, ww_categories, ww_colors_base):
         legend_ax.text((x0 + x1)/2, 0.05, label, ha='center', va='bottom', fontsize=10)
 
 # ------------------------------
+# ICON Grid laden (einmal!)
+# ------------------------------
+print(f"Lade ICON-Grid: {gridfile}")
+nc = netCDF4.Dataset(gridfile)
+lats = np.rad2deg(nc.variables["clat"][:]).flatten()
+lons = np.rad2deg(nc.variables["clon"][:]).flatten()
+nc.close()
+
+# ------------------------------
 # Dateien durchgehen
 # ------------------------------
 for filename in sorted(os.listdir(data_dir)):
     if not filename.endswith(".grib2"):
         continue
     path = os.path.join(data_dir, filename)
+    ds = cfgrib.open_dataset(path)
 
-    try:
-        ds = xr.open_dataset(
-        path,
-        engine="cfgrib",
-        backend_kwargs={
-            "filter_by_keys": {"typeOfLevel": "sfc"},  # statt "surface"
-            "indexpath": "",
-        },
-    )
-    except Exception as e:
-        print(f"Fehler beim Öffnen {filename}: {e}")
-        continue
-
-    # ECMWF-Namen suchen (mit allen GRIB-Messages)
-    varname = None
-    datasets = cfgrib.open_datasets(path)
-    for sub_ds in datasets:
-        for possible in ECMWF_VARS.get(var_type, []):
-            if possible in sub_ds.variables:
-                varname = possible
-                data = sub_ds[varname].values
-                break
-        if varname is not None:
-            break
-
-    if varname is None:
-        print(f"Keine passende Variable für {var_type} in {filename}: {list(datasets[0].variables.keys())}")
-        continue
-
-    # <<< ECMWF-Änderung >>>
-    # Koordinaten abrufen
-   # Suche das erste Dataset mit gültiger Variable
-    for sub_ds in datasets:
-        if varname in sub_ds.variables:
-            ds_use = sub_ds
-            break
-
-    lon = ds_use["longitude"].values
-    lat = ds_use["latitude"].values
-    data = ds_use[varname].values
-
-    # ECMWF hat oft longitudes 0–360 → auf -180..180 korrigieren
-    lon = np.where(lon > 180, lon - 360, lon)
-
-    # Gitter gleichmäßig (nicht immer 2D nötig)
-    lon2d, lat2d = np.meshgrid(lon, lat)
-
-    # <<< ECMWF-Änderung >>>
-    # Spezielle Datenumrechnung
+    # --------------------------
+    # Daten je Typ
+    # --------------------------
     if var_type == "t2m":
-        data = data - 273.15
+        if "t2m" not in ds: continue
+        data = ds["t2m"].values - 273.15
+        cmap, norm = t2m_colors, t2m_norm
+    elif var_type == "ww":
+        varname = next((vn for vn in ds.data_vars if vn in ["WW","weather"]), None)
+        if varname is None:
+            print(f"Keine WW in {filename}")
+            continue
+        data = ds[varname].values
+        cmap = None
     elif var_type == "tp_acc":
-        data = data * 1000  # m → mm
-        data[data < 0.1] = np.nan
+        if "tp" not in ds: continue
+        data = ds["tp"].values
+        data[data < 0.1] = 0 
+        cmap, norm = tp_acc_colors, tp_acc_norm
+        cmap.set_under('none')
     elif var_type == "pmsl":
-        data = data / 100  # Pa → hPa
+        if "prmsl" not in ds:
+            print(f"Keine prmsl-Variable in {filename} ds.keys(): {list(ds.keys())}")
+            continue
+        data = ds["prmsl"].values / 100
+        data[data < 0] = np.nan
+        cmap, norm = pmsl_colors, pmsl_norm
     elif var_type == "wind":
+        if "fg10" not in ds:
+            print(f"Keine passende Windvariable in {filename} ds.keys(): {list(ds.keys())}")
+            continue
+        data = ds["fg10"].values
+        data[data < 0] = np.nan
         data = data * 3.6  # m/s → km/h
+        cmap, norm = wind_colors, wind_norm
+    else:
+        print(f"Var_type {var_type} nicht implementiert")
+        continue
+    if data.ndim == 3:
+        data = data[0].flatten()
+    else:
+        data = data.flatten()
 
-    data[data < 0] = np.nan
-
-    # ds_use enthält die Variable + Koordinaten
-    time_val = ds_use["time"].values
-    run_time_utc = pd.to_datetime(time_val if np.ndim(time_val) == 0 else time_val[0])
-
-    step_val = ds_use.get("step", 0).values
-    step_hours = step_val if np.ndim(step_val) == 0 else step_val[0]
-
-    valid_time_utc = run_time_utc + pd.to_timedelta(step_hours, unit="h")
+    # --------------------------
+    # Zeiten
+    # --------------------------
+    run_time_utc = pd.to_datetime(ds["time"].values) if "time" in ds else None
+    if "valid_time" in ds:
+        valid_time_raw = ds["valid_time"].values
+        valid_time_utc = pd.to_datetime(valid_time_raw[0]) if np.ndim(valid_time_raw) > 0 else pd.to_datetime(valid_time_raw)
+    else:
+        step = pd.to_timedelta(ds["step"].values[0])
+        valid_time_utc = run_time_utc + step
     valid_time_local = valid_time_utc.tz_localize("UTC").astimezone(ZoneInfo("Europe/Berlin"))
-
 
     # --------------------------
     # Figure
@@ -253,91 +265,182 @@ for filename in sorted(os.listdir(data_dir)):
     scale = 0.9
     fig = plt.figure(figsize=(FIG_W_PX/100*scale, FIG_H_PX/100*scale), dpi=100)
     shift_up = 0.02
-    ax = fig.add_axes([0.0, BOTTOM_AREA_PX / FIG_H_PX + shift_up, 1.0, TOP_AREA_PX / FIG_H_PX],
+    ax = fig.add_axes([0.0, BOTTOM_AREA_PX/FIG_H_PX + shift_up, 1.0, TOP_AREA_PX/FIG_H_PX],
                       projection=ccrs.PlateCarree())
     ax.set_extent(extent)
     ax.set_axis_off()
     ax.set_aspect('auto')
 
-    # Plot
-    if var_type == "t2m":
-        im = ax.pcolormesh(lon, lat, data, cmap=t2m_cmap, norm=t2m_norm, shading="auto")
-    elif var_type == "ww":
+    # ------------------------------
+    # Regelmäßiges Gitter definieren
+    # ------------------------------
+    lon_min, lon_max, lat_min, lat_max = extent
+    # Unterschiedliche Auflösung für WW
+    if var_type == "ww":
+        res = 0.15  # z.B. gröberes Raster für WW
+    else:
+        res = 0.02  # Standard-Raster
+    lon_grid = np.arange(lon_min, lon_max + res, res)
+    lat_grid = np.arange(lat_min, lat_max + res, res)
+    lon_grid, lat_grid = np.meshgrid(lon_grid, lat_grid)
+
+    # ------------------------------
+    # Interpolation auf regelmäßiges Gitter
+    # ------------------------------
+    points = np.column_stack((lons, lats))
+    valid_mask = np.isfinite(data)
+    points_valid = points[valid_mask]
+    data_valid = data[valid_mask]
+
+    interpolator = NearestNDInterpolator(points_valid, data_valid)
+    data_grid = interpolator(lon_grid, lat_grid)
+
+    # --- Schnellere Raster-Darstellung statt tripcolor ---
+    if cmap is not None:
+        im = ax.pcolormesh(lon_grid, lat_grid, data_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
+        if var_type == "t2m":
+            smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
+            im = ax.pcolormesh(lon_grid, lat_grid, smoothed_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
+            ax.contour(lon_grid, lat_grid, gaussian_filter(data_grid, sigma=1.0), levels=t2m_bounds, colors='black', linewidths=0.3, alpha=0.5)
+            n_labels = 40
+            lon_min, lon_max, lat_min, lat_max = extent
+            valid_mask = np.isfinite(data) & (lons >= lon_min) & (lons <= lon_max) & (lats >= lat_min) & (lats <= lat_max)
+            valid_indices = np.flatnonzero(valid_mask)
+            np.random.shuffle(valid_indices)
+
+            min_city_dist = 1.0
+            texts = []
+            used_points = 0
+            tried_points = set()
+
+            while used_points < n_labels and len(tried_points) < len(valid_indices):
+                idx = valid_indices[np.random.randint(0, len(valid_indices))]
+                if idx in tried_points:
+                    continue
+                tried_points.add(idx)
+
+                lon_pt, lat_pt = lons[idx], lats[idx]
+                val = data[idx]
+
+                if any(np.hypot(lon_pt - city_lon, lat_pt - city_lat) < min_city_dist
+                    for city_lon, city_lat in zip(cities['lon'], cities['lat'])):
+                    continue
+
+                txt = ax.text(lon_pt, lat_pt, f"{val:.0f}", fontsize=10,
+                            ha='center', va='center', color='black', weight='bold')
+                txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
+                texts.append(txt)
+                used_points += 1
+            adjust_text(texts, ax=ax, expand_text=(1.2, 1.2), arrowprops=None)
+        elif var_type == "wind":
+            smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
+            im = ax.pcolormesh(lon_grid, lat_grid, smoothed_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
+        elif var_type == "pmsl":
+            data_hpa = data_grid
+            main_levels = list(range(912, 1070, 4))
+            fine_levels = list(range(912, 1070, 1))
+            main_levels = [lev for lev in main_levels if data_hpa.min() <= lev <= data_hpa.max()]
+            fine_levels = [lev for lev in fine_levels if data_hpa.min() <= lev <= data_hpa.max()]
+
+            cs_fine = ax.contour(lon_grid, lat_grid, data_hpa, levels=fine_levels,
+                                colors='white', linewidths=0.3, alpha=0.8)
+            cs_main = ax.contour(lon_grid, lat_grid, data_hpa, levels=main_levels,
+                                colors='white', linewidths=1.2, alpha=1)
+
+            used_points = set()
+            texts = []
+            min_city_dist = 1.1
+            nlat, nlon = lon_grid.shape
+            lon_flat = lon_grid.flatten()
+            lat_flat = lat_grid.flatten()
+
+            def place_random_labels(cs, n_labels):
+                contour_points = []
+                for level_segs in cs.allsegs:
+                    for seg in level_segs:
+                        if seg.size > 0:
+                            contour_points.extend(seg)
+                contour_points = np.array(contour_points)
+
+                lon_min, lon_max, lat_min, lat_max = extent
+                mask = (contour_points[:,0] >= lon_min + 0.5) & (contour_points[:,0] <= lon_max - 0.5) & \
+                       (contour_points[:,1] >= lat_min + 0.5) & (contour_points[:,1] <= lat_max - 0.5)
+                contour_points = contour_points[mask]
+
+                flat_indices = [np.argmin(np.hypot(lon_flat - lon_val, lat_flat - lat_val)) for lon_val, lat_val in contour_points]
+                ij_points = [(idx // nlon, idx % nlon) for idx in flat_indices]
+                ij_points = list(dict.fromkeys(ij_points))
+
+                filtered_points = []
+                for i, j in ij_points:
+                    lon_pt, lat_pt = lon_grid[i, j], lat_grid[i, j]
+                    if any(np.hypot(lon_pt - city_lon, lat_pt - city_lat) < min_city_dist
+                           for city_lon, city_lat in zip(cities['lon'], cities['lat'])):
+                        continue
+                    if (i, j) in used_points:
+                        continue
+                    filtered_points.append((i, j))
+
+                if len(filtered_points) > n_labels:
+                    chosen_points = [filtered_points[i] for i in np.random.choice(len(filtered_points), n_labels, replace=False)]
+                else:
+                    chosen_points = filtered_points
+
+                for i, j in chosen_points:
+                    val = data_hpa[i, j]
+                    txt = ax.text(lon_grid[i, j], lat_grid[i, j], f"{val:.0f}", fontsize=10,
+                                 ha='center', va='center', color='black', weight='bold')
+                    txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
+                    texts.append(txt)
+                    used_points.add((i, j))
+
+            place_random_labels(cs_main, n_labels=5)
+            place_random_labels(cs_fine, n_labels=5)
+            adjust_text(texts, ax=ax, expand_text=(1.5, 1.5), expand_points=(1.5, 1.5), force_text=(0.2, 0.2), force_points=(0.2, 0.2), arrowprops=dict(arrowstyle="-"))
+    else:
         valid_mask = np.isfinite(data)
         codes = np.unique(data[valid_mask]).astype(int)
-        codes = [c for c in codes if c in ww_colors_base and c not in ignore_codes]
+        codes = [c for c in codes if c in ww_colors_base]
         codes.sort()
         cmap = ListedColormap([ww_colors_base[c] for c in codes])
         code2idx = {c: i for i, c in enumerate(codes)}
-        idx_data = np.full_like(data, fill_value=np.nan, dtype=float)
-        for c,i in code2idx.items():
-            idx_data[data==c]=i
-        lon2d, lat2d = np.meshgrid(lon, lat)
-        im = ax.pcolormesh(lon2d, lat2d, idx_data, cmap=cmap, vmin=-0.5, vmax=len(codes)-0.5, shading="auto")
-    elif var_type == "tp_acc":
-        im = ax.pcolormesh(lon2d, lat2d, data, cmap=tp_acc_colors, norm=tp_acc_norm, shading="auto")
-    elif var_type == "wind":
-        im = ax.pcolormesh(lon, lat, data, cmap=wind_colors, norm=wind_norm, shading="auto")
-    elif var_type == "pmsl":
-    # Luftdruck-Daten
-        im = ax.pcolormesh(lon, lat, data, cmap=pmsl_colors, norm=pmsl_norm, shading="auto")
-        data_hpa = data  # data schon in hPa
+        idx_data = np.full_like(data_grid, fill_value=np.nan, dtype=float)
+        for c, i in code2idx.items():
+            idx_data[data_grid == c] = i
+        im = ax.pcolormesh(lon_grid, lat_grid, idx_data, cmap=cmap, vmin=-0.5, vmax=len(codes)-0.5, transform=ccrs.PlateCarree(), shading="auto")
 
-        # Haupt-Isobaren (alle 4 hPa)
-        main_levels = list(range(920, 1060, 4))
-        # Feine Isobaren (alle 2 hPa)
-        fine_levels = list(range(920, 1060, 1))
-
-        # Feine Isobaren-Linien (transparent)
-        ax.contour(lon, lat, data_hpa, levels=fine_levels,
-                colors='white', linewidths=0.3, alpha=0.8)
-
-        # Unsichtbare Feine Isobaren zum Beschriften (volle Deckkraft)
-        cs_fine_labels = ax.contour(lon, lat, data_hpa, levels=fine_levels,
-                                    colors='none', linewidths=0)  # unsichtbar, nur zum Labeln
-
-        # Haupt-Isobaren (dick, schwarz)
-        cs_main = ax.contour(lon, lat, data_hpa, levels=main_levels,
-                            colors='white', linewidths=1.2, alpha=1)
-
-        # Hauptlevels beschriften
-        ax.clabel(cs_main, levels=main_levels, inline=True, fmt='%d', fontsize=10,
-                inline_spacing=1, rightside_up=True, use_clabeltext=True, colors='black')
-
-        # Feinelevels beschriften (Text bleibt deckend)
-        ax.clabel(cs_fine_labels, levels=fine_levels, inline=True, fmt='%d', fontsize=10,
-                inline_spacing=1, rightside_up=True, use_clabeltext=True, colors='black')
-
-    # Bundesländer-Grenzen aus Cartopy (statt GeoJSON)
     ax.add_feature(cfeature.STATES.with_scale("10m"), edgecolor="#2C2C2C", linewidth=1)
     for _, city in cities.iterrows():
         ax.plot(city["lon"], city["lat"], "o", markersize=6, markerfacecolor="black",
                 markeredgecolor="white", markeredgewidth=1.5, zorder=5)
-        txt = ax.text(city["lon"]+0.1, city["lat"]+0.1, city["name"], fontsize=9,
-                      color="black", weight="bold", zorder=6)
+        txt = ax.text(city["lon"]+0.1, city["lat"]+0.1, city["name"],
+                      fontsize=9, color="black", weight="bold", zorder=6)
         txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
     ax.add_feature(cfeature.BORDERS, linestyle=":")
     ax.add_feature(cfeature.COASTLINE)
     ax.add_patch(mpatches.Rectangle((0,0),1,1, transform=ax.transAxes, fill=False, color="black", linewidth=2))
 
-    # Legende
+    # --------------------------
+    # Colorbar (falls relevant)
+    # --------------------------
     legend_h_px = 50
     legend_bottom_px = 45
-    if var_type in ["t2m","tp","tp_acc","cape_ml","dbz_cmax","wind","snow", "cloud", "twater", "snowfall", "pmsl"]:
-        bounds = t2m_bounds if var_type=="t2m" else tp_acc_bounds if var_type=="tp_acc" else wind_bounds if var_type=="wind" else pmsl_bounds_colors
+    if var_type in ["t2m", "dbz_cmax", "tp_acc", "cape_ml", "pmsl", "wind"]:
+        bounds = t2m_bounds if var_type=="t2m" else prec_bounds if var_type=="tp" else dbz_bounds if var_type=="dbz_cmax" else tp_acc_bounds if var_type=="tp_acc" else cape_bounds if var_type=="cape_ml" else pmsl_bounds_colors if var_type=="pmsl" else wind_bounds
         cbar_ax = fig.add_axes([0.03, legend_bottom_px / FIG_H_PX, 0.94, legend_h_px / FIG_H_PX])
         cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal", ticks=bounds)
         cbar.ax.tick_params(colors="black", labelsize=7)
         cbar.outline.set_edgecolor("black")
         cbar.ax.set_facecolor("white")
 
-         # Für pmsl nur jeden 10. hPa Tick beschriften
-        if var_type=="pmsl":
+        if var_type == "t2m":
+            tick_labels = [str(tick) if tick % 4 == 0 else "" for tick in bounds]
+            cbar.set_ticklabels(tick_labels)
+        if var_type == "pmsl":
             tick_labels = [str(tick) if tick % 8 == 0 else "" for tick in bounds]
             cbar.set_ticklabels(tick_labels)
-
-        if var_type=="tp_acc":
-            cbar.set_ticklabels([int(tick) if float(tick).is_integer() else tick for tick in tp_acc_bounds])
+        if var_type == "tp_acc":
+            cbar.set_ticklabels([int(tick) if float(tick).is_integer() else tick for tick in prec_bounds])
     else:
         add_ww_legend_bottom(fig, ww_categories, ww_colors_base)
 
@@ -349,22 +452,20 @@ for filename in sorted(os.listdir(data_dir)):
         "ww": "Signifikantes Wetter",
         "t2m": "Temperatur 2m (°C)",
         "tp_acc": "Akkumulierter Niederschlag (mm)",
-        "wind": "Windböen (km/h)",
-        "pmsl": "Luftdruck auf Meereshöhe (hPa)"
+        "pmsl": "Luftdruck auf Meereshöhe (hPa)",
+        "wind": "Windböen (km/h)"
     }
 
-    small_text = "Dieser Service basiert auf Daten und Produkten des Europäischen Zentrum für mittelfristige Wettervorhersagen (ECMWF)"
-
-    left_text = (footer_texts.get(var_type, var_type) +
-             (f"\nIFS ({pd.to_datetime(run_time_utc).hour:02d}z), ECMWF" if run_time_utc is not None else "\nIFS (??z), ECMWF"))
+    left_text = footer_texts.get(var_type, var_type) + \
+                f"\nICON-GLOBAL ({pd.to_datetime(run_time_utc).hour:02d}z), Deutscher Wetterdienst" \
+                if run_time_utc is not None else \
+                footer_texts.get(var_type, var_type) + "\nICON-GLOBAL (??z), Deutscher Wetterdienst"
 
     footer_ax.text(0.01, 0.85, left_text, fontsize=12, fontweight="bold", va="top", ha="left")
-    footer_ax.text(0.01, 0.10, small_text, fontsize=6, fontweight="bold", va="bottom", ha="left")
     footer_ax.text(0.734, 0.92, "Prognose für:", fontsize=12, va="top", ha="left", fontweight="bold")
     footer_ax.text(0.99, 0.68, f"{valid_time_local:%d.%m.%Y %H:%M} Uhr",
                    fontsize=12, va="top", ha="right", fontweight="bold")
 
-    # Speichern
     outname = f"{var_type}_{valid_time_local:%Y%m%d_%H%M}.png"
     plt.savefig(os.path.join(output_dir, outname), dpi=100, bbox_inches=None, pad_inches=0)
     plt.close()
