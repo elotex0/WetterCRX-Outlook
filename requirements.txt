@@ -5,3 +5,5 @@ cartopy
 geopandas
 shapely
 pandas
+adjustText
+scipy
