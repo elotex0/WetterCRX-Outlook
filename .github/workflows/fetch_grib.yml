@@ -41,7 +41,7 @@ jobs:
           HOUR=$(date -u +%H)
           case $HOUR in
             03|04|05) RUN=00 ;;
-            15|16|17) RUN=12 ;;
+            15|16|17|18) RUN=12 ;;
           esac
           DATE=$(date -u +%Y%m%d)
           echo "RUN=$RUN" >> $GITHUB_ENV
@@ -145,28 +145,6 @@ jobs:
             fi
           '
 
-      - name: Download pmsl GRIB2 files
-        run: |
-          mkdir -p data/pmsl
-          cd data/pmsl
-          seq 0 77 | xargs -n 1 -P 12 -I{} bash -c '
-            i_padded=$(printf "%03d" {} )
-            URL="https://opendata.dwd.de/weather/nwp/icon/grib/${{ env.RUN }}/pmsl/icon_global_icosahedral_single-level_${{ env.DATE }}${{ env.RUN }}_${i_padded}_PMSL.grib2.bz2"
-            wget -O pmsl_${i_padded}.grib2.bz2 "$URL" || echo "Datei $URL nicht verfügbar, überspringe..."
-            if [ -f "pmsl_${i_padded}.grib2.bz2" ]; then
-              bunzip2 -f pmsl_${i_padded}.grib2.bz2
-            fi
-          '
-
-          seq 78 3 180 | xargs -n 1 -P 12 -I{} bash -c '
-            i_padded=$(printf "%03d" {} )
-            URL="https://opendata.dwd.de/weather/nwp/icon/grib/${{ env.RUN }}/pmsl/icon_global_icosahedral_single-level_${{ env.DATE }}${{ env.RUN }}_${i_padded}_PMSL.grib2.bz2"
-            wget -O pmsl_${i_padded}.grib2.bz2 "$URL" || echo "Datei $URL nicht verfügbar, überspringe..."
-            if [ -f "pmsl_${i_padded}.grib2.bz2" ]; then
-              bunzip2 -f pmsl_${i_padded}.grib2.bz2
-            fi
-          '
-
       - name: Upload GRIB2 as artifact
         uses: actions/upload-artifact@v4
         with:
@@ -190,8 +168,8 @@ jobs:
     needs: fetch_and_generate
     strategy:
       matrix:
-        variable: [t2m, ww, tp_acc, wind, pmsl]
-      max-parallel: 5
+        variable: [t2m, ww, tp_acc, wind]
+      max-parallel: 4
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v3
