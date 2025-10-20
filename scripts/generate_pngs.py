@@ -347,6 +347,10 @@ for filename in sorted(os.listdir(data_dir)):
                 used_points += 1
 
             adjust_text(texts, ax=ax, expand_text=(1.2, 1.2), arrowprops=None)
+            
+        elif var_type == "tp_acc":
+            smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
+            im = ax.pcolormesh(lon_grid, lat_grid, smoothed_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
 
         elif var_type == "wind":
             smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
