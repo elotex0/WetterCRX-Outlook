@@ -233,10 +233,10 @@ for filename in sorted(os.listdir(data_dir)):
         data[data < 0] = np.nan
         cmap, norm = pmsl_colors, pmsl_norm
     elif var_type == "wind":
-        if "max_i10fg" not in ds:
+        if "fg10" not in ds:
             print(f"Keine passende Windvariable in {filename} ds.keys(): {list(ds.keys())}")
             continue
-        data = ds["max_i10fg"].values
+        data = ds["fg10"].values
         data[data < 0] = np.nan
         data = data * 3.6  # m/s → km/h
         cmap, norm = wind_colors, wind_norm
