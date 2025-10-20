@@ -552,9 +552,9 @@ for filename in sorted(os.listdir(data_dir)):
     }
 
     left_text = footer_texts.get(var_type, var_type) + \
-                f"\nICON-GLOBAL ({pd.to_datetime(run_time_utc).hour:02d}z), Deutscher Wetterdienst" \
+                f"\nICON ({pd.to_datetime(run_time_utc).hour:02d}z), Deutscher Wetterdienst" \
                 if run_time_utc is not None else \
-                footer_texts.get(var_type, var_type) + "\nICON-GLOBAL (??z), Deutscher Wetterdienst"
+                footer_texts.get(var_type, var_type) + "\nICON (??z), Deutscher Wetterdienst"
 
     footer_ax.text(0.01, 0.85, left_text, fontsize=12, fontweight="bold", va="top", ha="left")
     footer_ax.text(0.734, 0.92, "Prognose für:", fontsize=12, va="top", ha="left", fontweight="bold")
