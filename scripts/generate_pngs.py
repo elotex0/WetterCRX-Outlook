@@ -18,6 +18,7 @@ from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColor
 import warnings
 from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from scipy.ndimage import gaussian_filter
+from scipy.spatial import cKDTree
 from multiprocessing import Pool
 from matplotlib.tri import Triangulation
 
@@ -232,10 +233,10 @@ for filename in sorted(os.listdir(data_dir)):
         data[data < 0] = np.nan
         cmap, norm = pmsl_colors, pmsl_norm
     elif var_type == "wind":
-        if "fg10" not in ds:
+        if "max_i10fg" not in ds:
             print(f"Keine passende Windvariable in {filename} ds.keys(): {list(ds.keys())}")
             continue
-        data = ds["fg10"].values
+        data = ds["max_i10fg"].values
         data[data < 0] = np.nan
         data = data * 3.6  # m/s → km/h
         cmap, norm = wind_colors, wind_norm
@@ -278,8 +279,10 @@ for filename in sorted(os.listdir(data_dir)):
     # Unterschiedliche Auflösung für WW
     if var_type == "ww":
         res = 0.15  # z.B. gröberes Raster für WW
+    if var_type == "pmsl":
+        res = 0.025
     else:
-        res = 0.02  # Standard-Raster
+        res = 0.025  # Standard-Raster
     lon_grid = np.arange(lon_min, lon_max + res, res)
     lat_grid = np.arange(lat_min, lat_max + res, res)
     lon_grid, lat_grid = np.meshgrid(lon_grid, lat_grid)
@@ -301,17 +304,24 @@ for filename in sorted(os.listdir(data_dir)):
         if var_type == "t2m":
             smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
             im = ax.pcolormesh(lon_grid, lat_grid, smoothed_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
-            ax.contour(lon_grid, lat_grid, gaussian_filter(data_grid, sigma=1.0), levels=t2m_bounds, colors='black', linewidths=0.3, alpha=0.5)
+            ax.contour(lon_grid, lat_grid, smoothed_grid, levels=t2m_bounds, colors='black', linewidths=0.3, alpha=0.5)
             n_labels = 40
             lon_min, lon_max, lat_min, lat_max = extent
             valid_mask = np.isfinite(data) & (lons >= lon_min) & (lons <= lon_max) & (lats >= lat_min) & (lats <= lat_max)
             valid_indices = np.flatnonzero(valid_mask)
             np.random.shuffle(valid_indices)
 
-            min_city_dist = 1.0
+            # KDTree für Städte vorbereiten
+            city_coords = np.column_stack((cities['lon'], cities['lat']))
+            city_tree = cKDTree(city_coords)
+
+            min_city_dist = 1.0  # Mindestabstand in Grad
             texts = []
             used_points = 0
             tried_points = set()
+
+            # Wir wählen n_labels zufällige Indizes aus valid_indices
+            np.random.shuffle(valid_indices)
 
             while used_points < n_labels and len(tried_points) < len(valid_indices):
                 idx = valid_indices[np.random.randint(0, len(valid_indices))]
@@ -322,25 +332,75 @@ for filename in sorted(os.listdir(data_dir)):
                 lon_pt, lat_pt = lons[idx], lats[idx]
                 val = data[idx]
 
-                if any(np.hypot(lon_pt - city_lon, lat_pt - city_lat) < min_city_dist
-                    for city_lon, city_lat in zip(cities['lon'], cities['lat'])):
+                # ---- schnelle Distanzprüfung via KDTree ----
+                dist, _ = city_tree.query([lon_pt, lat_pt], distance_upper_bound=min_city_dist)
+                if np.isfinite(dist):  # d.h. ein Stadtpunkt liegt innerhalb des Radius
                     continue
+                # --------------------------------------------
 
-                txt = ax.text(lon_pt, lat_pt, f"{val:.0f}", fontsize=10,
-                            ha='center', va='center', color='black', weight='bold')
+                txt = ax.text(
+                    lon_pt, lat_pt, f"{val:.0f}",
+                    fontsize=10, ha='center', va='center', color='black', weight='bold'
+                )
                 txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
                 texts.append(txt)
                 used_points += 1
+
             adjust_text(texts, ax=ax, expand_text=(1.2, 1.2), arrowprops=None)
+
         elif var_type == "wind":
             smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
             im = ax.pcolormesh(lon_grid, lat_grid, smoothed_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
+            smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
+            ax.contour(lon_grid, lat_grid, smoothed_grid, levels=wind_bounds, colors='black', linewidths=0.3, alpha=0.5)
+            n_labels = 40
+            lon_min, lon_max, lat_min, lat_max = extent
+            valid_mask = np.isfinite(data) & (lons >= lon_min) & (lons <= lon_max) & (lats >= lat_min) & (lats <= lat_max)
+            valid_indices = np.flatnonzero(valid_mask)
+            np.random.shuffle(valid_indices)
+
+            # KDTree für Städte vorbereiten
+            city_coords = np.column_stack((cities['lon'], cities['lat']))
+            city_tree = cKDTree(city_coords)
+
+            min_city_dist = 1.0  # Mindestabstand in Grad
+            texts = []
+            used_points = 0
+            tried_points = set()
+
+            # Wir wählen n_labels zufällige Indizes aus valid_indices
+            np.random.shuffle(valid_indices)
+
+            while used_points < n_labels and len(tried_points) < len(valid_indices):
+                idx = valid_indices[np.random.randint(0, len(valid_indices))]
+                if idx in tried_points:
+                    continue
+                tried_points.add(idx)
+
+                lon_pt, lat_pt = lons[idx], lats[idx]
+                val = data[idx]
+
+                # ---- schnelle Distanzprüfung via KDTree ----
+                dist, _ = city_tree.query([lon_pt, lat_pt], distance_upper_bound=min_city_dist)
+                if np.isfinite(dist):  # d.h. ein Stadtpunkt liegt innerhalb des Radius
+                    continue
+                # --------------------------------------------
+
+                txt = ax.text(
+                    lon_pt, lat_pt, f"{val:.0f}",
+                    fontsize=10, ha='center', va='center', color='black', weight='bold'
+                )
+                txt.set_path_effects([path_effects.withStroke(linewidth=1.5, foreground="white")])
+                texts.append(txt)
+                used_points += 1
+
+            adjust_text(texts, ax=ax, expand_text=(1.2, 1.2), arrowprops=None)
         elif var_type == "pmsl":
             smoothed_grid = gaussian_filter(data_grid, sigma=1.2)
             im = ax.pcolormesh(lon_grid, lat_grid, smoothed_grid, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(), shading="auto")
-            data_hpa = data_grid
+            data_hpa = smoothed_grid
             main_levels = list(range(912, 1070, 4))
-            fine_levels = list(range(912, 1070, 1))
+            fine_levels = list(range(912, 1070, 2))
             main_levels = [lev for lev in main_levels if data_hpa.min() <= lev <= data_hpa.max()]
             fine_levels = [lev for lev in fine_levels if data_hpa.min() <= lev <= data_hpa.max()]
 
@@ -431,7 +491,7 @@ for filename in sorted(os.listdir(data_dir)):
             texts.append(txt_max)
             used_points.add(max_pos)
 
-            adjust_text(texts, ax=ax, expand_text=(1.5, 1.5), expand_points=(1.5, 1.5), force_text=(0.2, 0.2), force_points=(0.2, 0.2), arrowprops=None)
+            adjust_text(texts, ax=ax, expand_text=(1.5, 1.5), arrowprops=None)
     else:
         valid_mask = np.isfinite(data)
         codes = np.unique(data[valid_mask]).astype(int)
